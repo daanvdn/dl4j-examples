@@ -2,6 +2,7 @@ package org.deeplearning4j.tinyimagenet;
 
 import com.beust.jcommander.Parameter;
 import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.lang3.time.DurationFormatUtils;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.spark.SparkConf;
@@ -45,6 +46,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.BufferedOutputStream;
+import java.io.IOException;
 
 /**
  * This example trains a convolutional neural network image classifier on the Tiny ImageNet dataset using Apache Spark
@@ -71,11 +73,7 @@ import java.io.BufferedOutputStream;
 public class TrainSpark {
     public static final Logger log = LoggerFactory.getLogger(TrainSpark.class);
 
-    /* --- Required Arguments -- */
 
-    @Parameter(names = {"--dataPath"}, description = "Path (on HDFS or similar) of data preprocessed by preprocessing script." +
-        " See PreprocessLocal or PreprocessSpark", required = true)
-    private String dataPath;
 
     @Parameter(names = {"--masterIP"}, description = "Controller/master IP address - required. For example, 10.0.2.4", required = true)
     private String masterIP;
@@ -86,7 +84,7 @@ public class TrainSpark {
     @Parameter(names = {"--numNodes"}, description = "Number of Spark nodes (machines)", required = true)
     private int numNodes;
 
-    /* --- Optional Arguments -- */
+
 
     @Parameter(names = {"--saveDirectory"}, description = "If set: save the trained network plus evaluation to this directory." +
         " Otherwise, the trained net will not be saved")
@@ -111,12 +109,29 @@ public class TrainSpark {
     @Parameter(names = {"--port"}, description = "Port number for Spark nodes. This can be any free port (port must be free on all nodes)")
     private int port = 40123;
 
-    public static void main(String[] args) throws Exception {
+	@Parameter(names = {"--azureAccountKey"}, required = true)
+	private String azureAccountKey;
+	@Parameter(names = {"--azureAccountName"}, required = true)
+	private String azureAccountName;
+	@Parameter(names = {"--azureContainerName"}, required = true)
+	private String azureContainerName;
+
+
+	public static void main(String[] args) throws Exception {
         new TrainSpark().entryPoint(args);
     }
 
     protected void entryPoint(String[] args) throws Exception {
-        JCommanderUtils.parseArgs(this, args);
+
+
+		JCommanderUtils.parseArgs(this, args);
+		String azureTrainingFolder = AzureConf.getFolderPathInContainer(azureAccountName,
+				azureContainerName,
+				"train");
+		String  azureTestingFolder = AzureConf.getFolderPathInContainer(azureAccountName,
+				azureContainerName,
+				"test");
+
 
         SparkConf conf = new SparkConf();
         conf.setAppName(sparkAppName);
@@ -157,21 +172,20 @@ public class TrainSpark {
 
 
         //Fit the network
-        String trainPath = dataPath + (dataPath.endsWith("/") ? "" : "/") + "train";
-        JavaRDD<String> pathsTrain = SparkUtils.listPaths(sc, trainPath);
-        for (int i = 0; i < numEpochs; i++) {
-            log.info("--- Starting Training: Epoch {} of {} ---", (i + 1), numEpochs);
+        JavaRDD<String> pathsTrain = SparkUtils.listPaths(sc, azureTrainingFolder);
+        JavaRDD<String> pathsTest = SparkUtils.listPaths(sc, azureTestingFolder);
+		Evaluation evaluation = null;
+		for (int i = 0; i < numEpochs; i++) {
+			Timer epochTimer = Timer.start();
+			log.info("--- Starting Training: Epoch {} of {} ---", (i + 1), numEpochs);
             sparkNet.fitPaths(pathsTrain, loader);
-        }
+			log.info("--- Finished Training: Epoch {} of {} in {} ---", (i + 1), numEpochs, epochTimer.elapsed());
+			//Perform evaluation
+			evaluation = evaluate(sc, sparkNet, loader, i, pathsTest);
+		}
 
-        //Perform evaluation
-        String testPath = dataPath + (dataPath.endsWith("/") ? "" : "/") + "test";
-        JavaRDD<String> pathsTest = SparkUtils.listPaths(sc, testPath);
-        Evaluation evaluation = new Evaluation(TinyImageNetDataSetIterator.getLabels(false), 5); //Set up for top 5 accuracy
-        evaluation = (Evaluation) sparkNet.doEvaluation(pathsTest, loader, evaluation)[0];
-        log.info("Evaluation statistics: {}", evaluation.stats());
 
-        if (saveDirectory != null && saveDirectory.isEmpty()) {
+		if (saveDirectory != null && saveDirectory.isEmpty()) {
             log.info("Saving the network and evaluation to directory: {}", saveDirectory);
 
             // Save network
@@ -190,7 +204,22 @@ public class TrainSpark {
         log.info("----- Example Complete -----");
     }
 
-    public static ComputationGraph getNetwork() {
+
+	private Evaluation evaluate(JavaSparkContext sc, SparkComputationGraph sparkNet, RecordReaderFileBatchLoader loader,
+			int epoch, JavaRDD<String> pathsTest) throws IOException {
+		Timer testTimer = Timer.start();
+		log.info("--- Starting Testing: Epoch {} of {} ---", (epoch + 1), numEpochs);
+
+		Evaluation evaluation = new Evaluation(TinyImageNetDataSetIterator.getLabels(false),
+				5); //Set up for top 5 accuracy
+		evaluation = (Evaluation) sparkNet.doEvaluation(pathsTest, loader, evaluation)[0];
+		log.info("--- Finished Testing: Epoch {} of {} in {} ---", (epoch + 1), numEpochs, testTimer.elapsed());
+		log.info("Evaluation statistics: {}", evaluation.stats());
+
+		return evaluation;
+	}
+
+	public static ComputationGraph getNetwork() {
         //This network: created for the purposes of this example. It is a simple CNN loosely inspired by the DarkNet
         // architecture, which was in turn inspired by the VGG16/19 networks
         //The performance of this network can likely be improved
@@ -236,4 +265,26 @@ public class TrainSpark {
 
         return net;
     }
+
+
+	private static class Timer {
+
+		private final long start;
+
+		public Timer() {
+			this.start = System.currentTimeMillis();
+		}
+
+		public static Timer start() {
+
+			return new Timer();
+		}
+
+		public String elapsed() {
+
+			long elapsed = System.currentTimeMillis() - start;
+			return DurationFormatUtils.formatDuration(elapsed, "d:H:mm:ss", true);
+		}
+
+	}
 }

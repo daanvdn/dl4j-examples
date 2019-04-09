@@ -16,6 +16,7 @@ import org.deeplearning4j.nn.weights.WeightInit;
 import org.deeplearning4j.spark.api.RDDTrainingApproach;
 import org.deeplearning4j.spark.api.TrainingMaster;
 import org.deeplearning4j.spark.impl.multilayer.SparkDl4jMultiLayer;
+import org.deeplearning4j.spark.impl.paramavg.ParameterAveragingTrainingMaster;
 import org.deeplearning4j.spark.parameterserver.training.SharedTrainingMaster;
 import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.dataset.DataSet;
@@ -125,34 +126,7 @@ public class MnistMLPDistributedExample {
             .pretrain(false).backprop(true)
             .build();
 
-        //Configuration for Spark training: see https://deeplearning4j.org/distributed for explanation of these configuration options
-        VoidConfiguration voidConfiguration = VoidConfiguration.builder()
-
-            /**
-             * This can be any port, but it should be open for IN/OUT comms on all Spark nodes
-             */
-            .unicastPort(40123)
-
-            /**
-             * if you're running this example on Hadoop/YARN, please provide proper netmask for out-of-spark comms
-             */
-            .networkMask(networkMask)
-
-            /**
-             * However, if you're running this example on Spark standalone cluster, you can rely on Spark internal addressing via $SPARK_PUBLIC_DNS env variables announced on each node
-             */
-            .controllerAddress(useSparkLocal ? "127.0.0.1" : controllerAddress)
-            .build();
-
-        TrainingMaster tm = new SharedTrainingMaster.Builder(voidConfiguration, batchSizePerWorker)
-            // encoding threshold. Please check https://deeplearning4j.org/distributed for details
-            .updatesThreshold(1e-3)
-            .rddTrainingApproach(RDDTrainingApproach.Direct)
-            .batchSizePerWorker(batchSizePerWorker)
-
-            // this option will enforce exactly 4 workers for each Spark node
-            .workersPerNode(workersPerNode)
-            .build();
+        TrainingMaster tm = getParameterAveragingTrainingMaster();
 
         //Create the Spark network
         SparkDl4jMultiLayer sparkNet = new SparkDl4jMultiLayer(sc, conf, tm);
@@ -179,4 +153,50 @@ public class MnistMLPDistributedExample {
 
         log.info("***** Example Complete *****");
     }
+
+	private TrainingMaster getSharedTrainingMaster() {
+
+		VoidConfiguration voidConfiguration = VoidConfiguration.builder()
+
+				/**
+				 * This can be any port, but it should be open for IN/OUT comms on all Spark nodes
+				 */
+				.unicastPort(40123)
+
+				/**
+				 * if you're running this example on Hadoop/YARN, please provide proper netmask for out-of-spark comms
+				 */
+				.networkMask(networkMask)
+
+				/**
+				 * However, if you're running this example on Spark standalone cluster, you can rely on Spark internal addressing via $SPARK_PUBLIC_DNS env variables announced on each node
+				 */
+				.controllerAddress(useSparkLocal ? "127.0.0.1" : controllerAddress)
+				.build();
+
+		return new SharedTrainingMaster.Builder(voidConfiguration, batchSizePerWorker)
+			// encoding threshold. Please check https://deeplearning4j.org/distributed for details
+			.updatesThreshold(1e-3)
+			.rddTrainingApproach(RDDTrainingApproach.Direct)
+			.batchSizePerWorker(batchSizePerWorker)
+
+			// this option will enforce exactly 4 workers for each Spark node
+			.workersPerNode(workersPerNode)
+			.build();
+	}
+
+	private TrainingMaster getParameterAveragingTrainingMaster() {
+		log.info("Initializing {}", ParameterAveragingTrainingMaster.class);
+		ParameterAveragingTrainingMaster trainingMaster =
+				new ParameterAveragingTrainingMaster.Builder(batchSizePerWorker)
+						.workerPrefetchNumBatches(2)    //Async prefetch N batches for each worker
+						.averagingFrequency(2)
+						.batchSizePerWorker(batchSizePerWorker)
+						.rddTrainingApproach(RDDTrainingApproach.Export)
+						.build();
+		log.info("Finished initializing {}", ParameterAveragingTrainingMaster.class);
+		return trainingMaster;
+	}
+
+
 }

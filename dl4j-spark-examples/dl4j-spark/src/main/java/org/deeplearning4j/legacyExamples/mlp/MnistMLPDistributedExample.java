@@ -192,7 +192,7 @@ public class MnistMLPDistributedExample {
 						.workerPrefetchNumBatches(2)    //Async prefetch N batches for each worker
 						.averagingFrequency(2)
 						.batchSizePerWorker(batchSizePerWorker)
-						.rddTrainingApproach(RDDTrainingApproach.Export)
+						.rddTrainingApproach(RDDTrainingApproach.Direct)
 						.build();
 		log.info("Finished initializing {}", ParameterAveragingTrainingMaster.class);
 		return trainingMaster;
